@@ -1,0 +1,207 @@
+diff --git a/src/3d/chunks/qgschunkedentity_p.cpp b/src/3d/chunks/qgschunkedentity_p.cpp
+index 6d34ee64fa..b7bafc0f97 100644
+--- a/src/3d/chunks/qgschunkedentity_p.cpp
++++ b/src/3d/chunks/qgschunkedentity_p.cpp
+@@ -40,6 +40,137 @@ typedef Qt3DCore::QBuffer Qt3DQBuffer;
+ 
+ ///@cond PRIVATE
+ 
++QVariantList dumpBbox( const QgsAABB &bbox )
++{
++  QVariantList vl;
++  vl << bbox.xMin << bbox.yMin << bbox.zMin << bbox.xMax << bbox.yMax << bbox.zMax;
++  return vl;
++}
++
++struct ChunkNodeInfo
++{
++  QgsChunkNodeId nodeId;
++  float nodeError;
++  QgsAABB nodeBbox;
++  QgsChunkNode::State nodeState;
++
++  QVariantMap dump() const
++  {
++    QVariantMap vm;
++    vm["id"] = nodeId.text();
++    vm["error"] = nodeError;
++    vm["bbox"] = dumpBbox( nodeBbox );
++    vm["state"] = ( int ) nodeState;
++    return vm;
++  }
++};
++
++struct EntityUpdateRecord
++{
++  QTime timeUpdateStart, timeUpdateFinish;
++  QgsChunkedEntity::SceneState sceneState;
++  // state at the end
++  QVector<QgsChunkNodeId> activeNodes;
++  QVector<ChunkNodeInfo> replacementQueueNodes;   // in the order in the replacement queue
++  QVector<ChunkNodeInfo> loadingQueueNode;        // in the order in the loading queue
++  QVector<ChunkNodeInfo> activeJobsNodes;      // nodes as active jobs (now being loaded)
++
++  // TODO? pruned nodes at start, unloaded nodes at the end
++};
++
++#include <nlohmann/json.hpp>
++#include "qgsjsonutils.h"
++
++struct EntityLog
++{
++  QTime timeLogStart;
++  QVector<EntityUpdateRecord> records;
++
++  EntityLog()
++  {
++    timeLogStart = QTime::currentTime();
++  }
++
++  EntityUpdateRecord &currentRecord() { return records.last(); }
++
++  static QVariantList vector2variant( const QVector3D &v )
++  {
++    QVariantList lst;
++    lst << v.x() << v.y() << v.z();
++    return lst;
++  }
++
++  void toJson( const QString &outputFilename )
++  {
++    QVariantList recs;
++    for ( const EntityUpdateRecord &r : std::as_const( records ) )
++    {
++      QVariantMap r2;
++      r2["timeStart"] = r.timeUpdateStart.toString( "hh:mm:ss.zzz" );
++      r2["timeFinish"] = r.timeUpdateFinish.toString( "hh:mm:ss.zzz" );
++      r2["camera"] = vector2variant( r.sceneState.cameraPos );
++      // TODO: camera matrix
++
++      QVariantList activeLst;
++      for ( const QgsChunkNodeId &nid : std::as_const( r.activeNodes ) )
++        activeLst << nid.text();
++      r2["active"] = activeLst;
++
++      QVariantList loadLst;
++      for ( const ChunkNodeInfo &ni : std::as_const( r.loadingQueueNode ) )
++        loadLst << ni.dump();
++      r2["loading"] = loadLst;
++
++      QVariantList replLst;
++      for ( const ChunkNodeInfo &ni : std::as_const( r.replacementQueueNodes ) )
++        replLst << ni.dump();
++      r2["replacement"] = replLst;
++
++      QVariantList jobsLst;
++      for ( const ChunkNodeInfo &ni : std::as_const( r.activeJobsNodes ) )
++        jobsLst << ni.dump();
++      r2["jobs"] = jobsLst;
++
++      recs.append( r2 );
++    }
++
++    QVariantMap var;
++    var["rec"] = recs;
++    var["timeStart"] = timeLogStart.toString( "hh:mm:ss.zzz" );
++
++    json j = QgsJsonUtils::jsonFromVariant( var );
++    QFile f( outputFilename );
++    if ( !f.open( QIODevice::WriteOnly ) )
++    {
++      Q_ASSERT( false );
++      return;  // TODO
++    }
++    f.write( QByteArray::fromStdString( j.dump() ) );
++  }
++};
++
++ChunkNodeInfo _dumpChunkInfo( QgsChunkNode *ch )
++{
++  ChunkNodeInfo n;
++  n.nodeId = ch->tileId();
++  n.nodeBbox = ch->bbox();
++  n.nodeError = ch->error();
++  n.nodeState = ch->state();
++  return n;
++}
++
++void _dumpList( QgsChunkList *lst, QVector<ChunkNodeInfo> &output )
++{
++  QgsChunkListEntry *ptr = lst->first();
++  while ( ptr )
++  {
++    QgsChunkNode *ch = ptr->chunk;
++    output.append( _dumpChunkInfo( ch ) );
++    ptr = ptr->next;
++  }
++}
++
++
+ static float screenSpaceError( float epsilon, float distance, float screenSize, float fov )
+ {
+   /* This routine approximately calculates how an error (epsilon) of an object in world coordinates
+@@ -89,11 +220,15 @@ QgsChunkedEntity::QgsChunkedEntity( float tau, QgsChunkLoaderFactory *loaderFact
+   mRootNode = loaderFactory->createRootNode();
+   mChunkLoaderQueue = new QgsChunkList;
+   mReplacementQueue = new QgsChunkList;
++
++  mLog.reset( new EntityLog );
+ }
+ 
+ 
+ QgsChunkedEntity::~QgsChunkedEntity()
+ {
++  mLog->toJson( "/tmp/dump.json" );
++
+   // derived classes have to make sure that any pending active job has finished / been canceled
+   // before getting to this destructor - here it would be too late to cancel them
+   // (e.g. objects required for loading/updating have been deleted already)
+@@ -138,6 +273,10 @@ void QgsChunkedEntity::update( const SceneState &state )
+   if ( !mIsValid )
+     return;
+ 
++  mLog->records.append( EntityUpdateRecord() );
++  mLog->currentRecord().timeUpdateStart = QTime::currentTime();
++  mLog->currentRecord().sceneState = state;
++
+   // Let's start the update by removing from loader queue chunks that
+   // would get frustum culled if loaded (outside of the current view
+   // of the camera). Removing them keeps the loading queue shorter,
+@@ -210,6 +349,15 @@ void QgsChunkedEntity::update( const SceneState &state )
+     mBboxesEntity->setBoxes( bboxes );
+   }
+ 
++  for ( QgsChunkNode *n : std::as_const( mActiveNodes ) )
++    mLog->currentRecord().activeNodes.append( n->tileId() );
++  _dumpList( mChunkLoaderQueue, mLog->currentRecord().loadingQueueNode );
++  _dumpList( mReplacementQueue, mLog->currentRecord().replacementQueueNodes );
++  for ( QgsChunkQueueJob *j : std::as_const( mActiveJobs ) )
++    mLog->currentRecord().activeJobsNodes.append( _dumpChunkInfo( j->chunk() ) );
++
++  mLog->currentRecord().timeUpdateFinish = QTime::currentTime();
++
+   // start a job from queue if there is anything waiting
+   startJobs();
+ 
+diff --git a/src/3d/chunks/qgschunkedentity_p.h b/src/3d/chunks/qgschunkedentity_p.h
+index 857b0e2a93..71b70ce5a9 100644
+--- a/src/3d/chunks/qgschunkedentity_p.h
++++ b/src/3d/chunks/qgschunkedentity_p.h
+@@ -40,6 +40,8 @@ class QgsChunkLoaderFactory;
+ class QgsChunkBoundsEntity;
+ class QgsChunkQueueJobFactory;
+ 
++struct EntityLog;
++
+ #include <QVector3D>
+ #include <QMatrix4x4>
+ 
+@@ -211,6 +213,8 @@ class QgsChunkedEntity : public Qt3DCore::QEntity
+ 
+     int mPrimitivesBudget = std::numeric_limits<int>::max();
+     double mGpuMemoryLimit = 500.0; // in megabytes
++
++    std::unique_ptr<EntityLog> mLog;
+ };
+ 
+ /// @endcond
