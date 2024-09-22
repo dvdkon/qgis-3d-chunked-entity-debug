@@ -9,9 +9,9 @@ Then there is a simple PyQt GUI for visualization of these logs.
 
 How to use:
 
-1. Compile QGIS with `entity_log.diff` from this repo applied in it (possibly adjust output path for JSON)
+1. Compile QGIS with `entity_log.diff` from this repo applied in it (possibly adjust output path for JSON in `QgsChunkedEntity::~QgsChunkedEntity()`)
 
-2. Run QGIS with 3D view, then close it - JSON file should appear
+2. Run QGIS with 3D view, then close it - JSON file should appear (by default `/tmp/qgis_chunked_entity_debug.json`)
 
 3. Run `python chunkloader_gui.py <json_log_file>` to visualize recorded data (you may need to adjust path to QGIS in the python script)
 

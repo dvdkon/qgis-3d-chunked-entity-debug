@@ -17,7 +17,7 @@ TODO:
 """
 
 
-filename = sys.argv[1] if len(sys.argv) > 1 else "/tmp/dump.json"
+filename = sys.argv[1] if len(sys.argv) > 1 else "/tmp/qgis_chunked_entity_debug.json"
 
 with open(filename) as f:
     data = json.load(f)

@@ -1,12 +1,12 @@
 diff --git a/src/3d/chunks/qgschunkedentity_p.cpp b/src/3d/chunks/qgschunkedentity_p.cpp
-index 6d34ee64fa..b7bafc0f97 100644
+index fe78f64cd4b..16b61abad8b 100644
 --- a/src/3d/chunks/qgschunkedentity_p.cpp
 +++ b/src/3d/chunks/qgschunkedentity_p.cpp
-@@ -40,6 +40,137 @@ typedef Qt3DCore::QBuffer Qt3DQBuffer;
+@@ -30,6 +30,137 @@
  
  ///@cond PRIVATE
  
-+QVariantList dumpBbox( const QgsAABB &bbox )
++static QVariantList dumpBbox( const QgsAABB &bbox )
 +{
 +  QVariantList vl;
 +  vl << bbox.xMin << bbox.yMin << bbox.zMin << bbox.xMax << bbox.yMax << bbox.zMax;
@@ -34,7 +34,7 @@ index 6d34ee64fa..b7bafc0f97 100644
 +struct EntityUpdateRecord
 +{
 +  QTime timeUpdateStart, timeUpdateFinish;
-+  QgsChunkedEntity::SceneState sceneState;
++  Qgs3DMapSceneEntity::SceneContext sceneContext;
 +  // state at the end
 +  QVector<QgsChunkNodeId> activeNodes;
 +  QVector<ChunkNodeInfo> replacementQueueNodes;   // in the order in the replacement queue
@@ -74,7 +74,7 @@ index 6d34ee64fa..b7bafc0f97 100644
 +      QVariantMap r2;
 +      r2["timeStart"] = r.timeUpdateStart.toString( "hh:mm:ss.zzz" );
 +      r2["timeFinish"] = r.timeUpdateFinish.toString( "hh:mm:ss.zzz" );
-+      r2["camera"] = vector2variant( r.sceneState.cameraPos );
++      r2["camera"] = vector2variant( r.sceneContext.cameraPos );
 +      // TODO: camera matrix
 +
 +      QVariantList activeLst;
@@ -137,37 +137,39 @@ index 6d34ee64fa..b7bafc0f97 100644
 +}
 +
 +
- static float screenSpaceError( float epsilon, float distance, float screenSize, float fov )
+ 
+ static float screenSpaceError( QgsChunkNode *node, const QgsChunkedEntity::SceneContext &sceneContext )
  {
-   /* This routine approximately calculates how an error (epsilon) of an object in world coordinates
-@@ -89,11 +220,15 @@ QgsChunkedEntity::QgsChunkedEntity( float tau, QgsChunkLoaderFactory *loaderFact
-   mRootNode = loaderFactory->createRootNode();
+@@ -70,6 +201,8 @@ QgsChunkedEntity::QgsChunkedEntity( Qgs3DMapSettings *mapSettings, float tau, Qg
    mChunkLoaderQueue = new QgsChunkList;
    mReplacementQueue = new QgsChunkList;
-+
+ 
 +  mLog.reset( new EntityLog );
- }
++
+   // in case the chunk loader factory supports fetching of hierarchy in background (to avoid GUI freezes)
+   connect( loaderFactory, &QgsChunkLoaderFactory::childrenPrepared, this, [this]
+   {
+@@ -86,6 +219,8 @@ QgsChunkedEntity::~QgsChunkedEntity()
+   // (e.g. objects required for loading/updating have been deleted already)
+   Q_ASSERT( mActiveJobs.isEmpty() );
  
- 
- QgsChunkedEntity::~QgsChunkedEntity()
- {
 +  mLog->toJson( "/tmp/dump.json" );
 +
-   // derived classes have to make sure that any pending active job has finished / been canceled
-   // before getting to this destructor - here it would be too late to cancel them
-   // (e.g. objects required for loading/updating have been deleted already)
-@@ -138,6 +273,10 @@ void QgsChunkedEntity::update( const SceneState &state )
+   // clean up any pending load requests
+   while ( !mChunkLoaderQueue->isEmpty() )
+   {
+@@ -125,6 +260,10 @@ void QgsChunkedEntity::handleSceneUpdate( const SceneContext &sceneContext )
    if ( !mIsValid )
      return;
  
 +  mLog->records.append( EntityUpdateRecord() );
 +  mLog->currentRecord().timeUpdateStart = QTime::currentTime();
-+  mLog->currentRecord().sceneState = state;
++  mLog->currentRecord().sceneContext = sceneContext;
 +
    // Let's start the update by removing from loader queue chunks that
    // would get frustum culled if loaded (outside of the current view
    // of the camera). Removing them keeps the loading queue shorter,
-@@ -210,6 +349,15 @@ void QgsChunkedEntity::update( const SceneState &state )
+@@ -198,6 +337,15 @@ void QgsChunkedEntity::handleSceneUpdate( const SceneContext &sceneContext )
      mBboxesEntity->setBoxes( bboxes );
    }
  
@@ -184,22 +186,22 @@ index 6d34ee64fa..b7bafc0f97 100644
    startJobs();
  
 diff --git a/src/3d/chunks/qgschunkedentity_p.h b/src/3d/chunks/qgschunkedentity_p.h
-index 857b0e2a93..71b70ce5a9 100644
+index f7bbc5f23cd..f6f2b78d6cd 100644
 --- a/src/3d/chunks/qgschunkedentity_p.h
 +++ b/src/3d/chunks/qgschunkedentity_p.h
-@@ -40,6 +40,8 @@ class QgsChunkLoaderFactory;
- class QgsChunkBoundsEntity;
- class QgsChunkQueueJobFactory;
+@@ -47,6 +47,8 @@ namespace QgsRayCastingUtils
+   struct RayHit;
+ }
  
 +struct EntityLog;
 +
  #include <QVector3D>
  #include <QMatrix4x4>
  
-@@ -211,6 +213,8 @@ class QgsChunkedEntity : public Qt3DCore::QEntity
+@@ -167,6 +169,8 @@ class QgsChunkedEntity : public Qgs3DMapSceneEntity
+     bool mIsValid = true;
  
      int mPrimitivesBudget = std::numeric_limits<int>::max();
-     double mGpuMemoryLimit = 500.0; // in megabytes
 +
 +    std::unique_ptr<EntityLog> mLog;
  };
